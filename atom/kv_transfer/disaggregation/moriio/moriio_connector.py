@@ -67,7 +67,6 @@ if _MORIIO_AVAILABLE:
     from mori.io import (
         BackendType,
         EngineDesc,
-        FabricBackendConfig,
         IOEngine,
         IOEngineConfig,
         PollCqMode,
@@ -195,6 +194,9 @@ class MoRIIOConnector(KVConnectorBase):
             or os.environ.get("ATOM_MORIIO_FABRIC", "0") == "1"
         )
         if self._moriio_use_fabric:
+            # Lazy: fabric backend is absent on older mori-io builds.
+            from mori.io import FabricBackendConfig
+
             fabric_cfg = FabricBackendConfig()
             fabric_cfg.num_streams = kv_transfer_config.get("fabric_num_streams", 4)
             fabric_cfg.num_events = kv_transfer_config.get("fabric_num_events", 16)
@@ -556,7 +558,8 @@ class MoRIIOConnector(KVConnectorBase):
                 f"{kind} region total_bytes={region.total_bytes} is not a "
                 f"multiple of unit_bytes={region.unit_bytes}"
             )
-        if region.unit_bytes > MAX_RDMA_CHUNK_BYTES:
+        # RDMA-only: a unit must fit in one <2 GiB ibv_reg_mr chunk.
+        if not self._moriio_use_fabric and region.unit_bytes > MAX_RDMA_CHUNK_BYTES:
             raise ValueError(
                 f"{kind} region unit_bytes={region.unit_bytes} exceeds "
                 f"MAX_RDMA_CHUNK_BYTES={MAX_RDMA_CHUNK_BYTES}"
@@ -565,7 +568,11 @@ class MoRIIOConnector(KVConnectorBase):
         self._assert_region_on_device(region, device_id)
 
         total_units = region.total_bytes // region.unit_bytes
-        units_per_chunk = max(1, MAX_RDMA_CHUNK_BYTES // region.unit_bytes)
+        # Fabric registers each region as a single desc (see _chunk_kv_tensor).
+        if self._moriio_use_fabric:
+            units_per_chunk = total_units
+        else:
+            units_per_chunk = max(1, MAX_RDMA_CHUNK_BYTES // region.unit_bytes)
         chunks: list[bytes] = []
         for unit_start in range(0, total_units, units_per_chunk):
             units = min(units_per_chunk, total_units - unit_start)
